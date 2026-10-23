@@ -21,6 +21,13 @@ def setwebhook():
                allowed_updates=["message", "callback_query"], drop_pending_updates=True)
     return jsonify(r)
 
+@app.get("/cron")
+def cron():  # external pinger (cron-job.org) isko har minute hit kare, tempadmin auto-demote ke liye
+    if request.args.get("key") != SECRET:
+        return "forbidden", 403
+    bot.run_jobs(force=True)
+    return "ok"
+
 @app.post("/webhook")
 def webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:

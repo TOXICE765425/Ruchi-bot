@@ -27,7 +27,15 @@ Background mein: `nohup python bot.py &` ya pm2 / systemd.
 - `/setprivacy` -> Disable (group mein messages dikhne ke liye)
 - Group mein bot ko admin banao (ban/mute/promote ke liye rights do)
 
-## Dhyan rakhne wali baatein
-- Memory `data/db.json` mein save hoti hai. Vercel pe disk permanent nahi, to memory reset ho sakti hai;
-  Render free tier pe bhi restart pe reset hota hai. VPS/Railway (volume) pe permanent.
-- `/tempadmin` ka auto-demote Vercel pe nahi chalega (background thread nahi hota).
+## Firebase Realtime Database (permanent memory, Vercel ke liye zaroori)
+1. console.firebase.google.com -> project banao -> Build -> Realtime Database -> Create database
+2. Rules tab mein: `{ "rules": { ".read": false, ".write": false } }` -> Publish
+3. Database ka URL copy karo (jaise `https://xxxx-default-rtdb.firebaseio.com`) -> `FIREBASE_DB_URL`
+4. Project settings -> Service accounts -> Database secrets -> secret copy karo -> `FIREBASE_SECRET`
+5. Dono env variables Vercel/Render mein daalo aur Redeploy karo
+
+Firebase set na ho to memory local `data/db.json` mein save hoti hai (Vercel pe reset ho jayegi).
+
+## /tempadmin auto-demote (Vercel)
+Vercel pe background thread nahi chalta. cron-job.org (free) pe ek job banao jo har minute
+`https://TUMHARA-URL/cron?key=WEBHOOK_SECRET` hit kare. Render/Railway/VPS pe iski zaroorat nahi.

@@ -30,7 +30,22 @@ SYSTEM_PROMPT = f"""Tum {GF_NAME} ho, user ki caring, sweet aur thodi naughty gi
 - Explicit/adult content nahi; flirty aur romantic tak theek hai.
 """
 
-# ================= STORAGE =================
+# ================= STORAGE (Firebase Realtime DB, warna local file) =================
+FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "").rstrip("/")
+FIREBASE_SECRET = os.getenv("FIREBASE_SECRET", "")
+
+def fb(method, path, data=None):
+    params = {"auth": FIREBASE_SECRET} if FIREBASE_SECRET else {}
+    try:
+        r = requests.request(method, f"{FIREBASE_DB_URL}/{path}.json", params=params, json=data, timeout=15)
+        if r.status_code != 200:
+            print("Firebase error:", r.status_code, r.text[:200])
+            return None
+        return r.json()
+    except Exception as e:
+        print("Firebase error:", e)
+        return None
+
 def load_db():
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -40,15 +55,74 @@ def load_db():
     d.setdefault("history", {}); d.setdefault("users", {}); d.setdefault("jobs", [])
     return d
 
-db = load_db()
+db = {} if FIREBASE_DB_URL else load_db()
 
 def save_db():
+    if FIREBASE_DB_URL:
+        return
     with lock:
         try:
             with open(DB_FILE, "w", encoding="utf-8") as f:
                 json.dump(db, f, ensure_ascii=False)
         except Exception as e:
             print("save error:", e)
+
+def get_history(key):
+    if FIREBASE_DB_URL:
+        return fb("GET", f"history/{key}") or []
+    return db["history"].get(key, [])
+
+def set_history(key, msgs):
+    if FIREBASE_DB_URL:
+        fb("PUT", f"history/{key}", msgs)
+    else:
+        db["history"][key] = msgs
+        save_db()
+
+def del_history(key):
+    if FIREBASE_DB_URL:
+        fb("DELETE", f"history/{key}")
+    else:
+        db["history"].pop(key, None)
+        save_db()
+
+_seen_users = {}
+def set_user(username, uid):
+    username = username.lower()
+    if _seen_users.get(username) == uid:
+        return
+    _seen_users[username] = uid
+    if FIREBASE_DB_URL:
+        fb("PUT", f"users/{username}", uid)
+    else:
+        db["users"][username] = uid
+        save_db()
+
+def get_user(username):
+    username = username.lower()
+    if FIREBASE_DB_URL:
+        return fb("GET", f"users/{username}")
+    return db["users"].get(username)
+
+def get_jobs():
+    if FIREBASE_DB_URL:
+        return list((fb("GET", "jobs") or {}).values())
+    return list(db["jobs"])
+
+def add_job(job):
+    job["id"] = str(time.time_ns())
+    if FIREBASE_DB_URL:
+        fb("PUT", f"jobs/{job['id']}", job)
+    else:
+        db["jobs"].append(job)
+        save_db()
+
+def del_job(jid):
+    if FIREBASE_DB_URL:
+        fb("DELETE", f"jobs/{jid}")
+    else:
+        db["jobs"] = [j for j in db["jobs"] if j["id"] != jid]
+        save_db()
 
 # ================= TELEGRAM HELPERS =================
 def tg(method, **p):
@@ -187,7 +261,7 @@ def send_start(msg):
 
 # ================= AI CHAT =================
 def ask_ai(key, user_text):
-    msgs = db["history"].get(key, [])
+    msgs = get_history(key)
     msgs.append({"role": "user", "content": user_text})
     msgs = msgs[-HISTORY_LIMIT:]
     reply = None
@@ -212,8 +286,7 @@ def ask_ai(key, user_text):
     if not reply:
         return "Uff, network thoda slow hai baby 🥺 ek baar phir se bolo na?"
     msgs.append({"role": "assistant", "content": reply})
-    db["history"][key] = msgs[-HISTORY_LIMIT:]
-    save_db()
+    set_history(key, msgs[-HISTORY_LIMIT:])
     return reply
 
 def addressed(msg, text):
@@ -271,7 +344,7 @@ def resolve_target(msg, args):
         if a.isdigit():
             return int(a), "User", args[1:]
         if a.startswith("@"):
-            uid = db["users"].get(a[1:].lower())
+            uid = get_user(a[1:])
             if uid:
                 return uid, a, args[1:]
     return None, None, args
@@ -339,28 +412,27 @@ def mod_cmd(msg, cmd, args):
     elif cmd == "tempadmin":
         r = tg("promoteChatMember", chat_id=cid, user_id=uid, **LIMITED_ADMIN)
         if r.get("ok"):
-            db["jobs"].append({"chat": cid, "user": uid, "at": int(time.time()) + dur})
-            save_db()
+            add_job({"chat": cid, "user": uid, "at": int(time.time()) + dur})
         result(cid, r, f"⏱ {who} {rest[0]} ke liye admin.")
 
 MOD_CMDS = {"ban", "unban", "kick", "kickme", "mute", "tmute", "unmute", "tban", "sban", "dban",
             "promote", "fullpromote", "demote", "tempadmin"}
 
-def run_jobs():
-    now, keep = int(time.time()), []
-    for j in db["jobs"]:
+_last_jobs = [0]
+def run_jobs(force=False):
+    now = int(time.time())
+    if not force and now - _last_jobs[0] < 15:
+        return
+    _last_jobs[0] = now
+    for j in get_jobs():
         if j["at"] <= now:
             tg("promoteChatMember", chat_id=j["chat"], user_id=j["user"], **NO_ADMIN)
-        else:
-            keep.append(j)
-    if len(keep) != len(db["jobs"]):
-        db["jobs"] = keep
-        save_db()
+            del_job(j["id"])
 
 def job_loop():
     while True:
         try:
-            run_jobs()
+            run_jobs(force=True)
         except Exception as e:
             print("job error:", e)
         time.sleep(20)
@@ -375,7 +447,7 @@ def process_update(u):
         return
     user = msg["from"]
     if msg["chat"]["type"] != "private" and user.get("username"):
-        db["users"][user["username"].lower()] = user["id"]
+        set_user(user["username"], user["id"])
     text = msg.get("text") or ""
     if text.startswith("/"):
         parts = text.split()
@@ -392,8 +464,7 @@ def process_update(u):
         if cmd == "reset":
             cid = msg["chat"]["id"]
             key = str(cid) if msg["chat"]["type"] == "private" else f"{cid}:{user['id']}"
-            db["history"].pop(key, None)
-            save_db()
+            del_history(key)
             return say(cid, "Chalo fresh start karte hain 😊 Hi!")
         if cmd in MOD_CMDS:
             return mod_cmd(msg, cmd, args)
